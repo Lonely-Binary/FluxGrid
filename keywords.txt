@@ -1,0 +1,33 @@
+# Fluxgrid — Arduino IDE syntax highlighting
+# (fields separated by a single TAB)
+
+Fluxgrid	KEYWORD1
+FluxgridClass	KEYWORD1
+FluxValue	KEYWORD1
+FluxgridSerial	KEYWORD1
+
+begin	KEYWORD2
+run	KEYWORD2
+write	KEYWORD2
+read	KEYWORD2
+has	KEYWORD2
+onReceive	KEYWORD2
+onConnected	KEYWORD2
+connected	KEYWORD2
+enableOTA	KEYWORD2
+autoConfig	KEYWORD2
+setDevice	KEYWORD2
+setServer	KEYWORD2
+secure	KEYWORD2
+setCACert	KEYWORD2
+setLogHandle	KEYWORD2
+
+FLUXGRID_CAPTURE_SERIAL	LITERAL1
+
+asInt	KEYWORD2
+asLong	KEYWORD2
+asFloat	KEYWORD2
+asDouble	KEYWORD2
+asBool	KEYWORD2
+asString	KEYWORD2
+isEmpty	KEYWORD2
