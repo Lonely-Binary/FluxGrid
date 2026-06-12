@@ -86,7 +86,7 @@ void doScan() {
     payload += encName(WiFi.encryptionType(i));
     payload += "\",\"b\":\"";
     payload += WiFi.BSSIDstr(i);
-    payload += "\"}";  
+    payload += "\"}";
 
     // Safety: bail if we're approaching the 512-char bridge limit.
     if (payload.length() > 480) {

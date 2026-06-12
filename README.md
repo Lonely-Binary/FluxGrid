@@ -31,9 +31,10 @@ for you; use that handle here. Pick anything readable (`temp`, `relay`,
 
 **Requirements:** ESP32 Arduino core + [`PubSubClient`](https://github.com/knolleary/pubsubclient) (install from Library Manager).
 
-Then install Fluxgrid one of two ways:
+Then install Fluxgrid one of three ways:
 - **Arduino IDE → Library Manager** — search "Fluxgrid" and install, **or**
-- **Sketch → Include Library → Add .ZIP Library…** and pick the downloaded ZIP.
+- **Sketch → Include Library → Add .ZIP Library…** and pick the downloaded ZIP, **or**
+- copy the `Fluxgrid/` folder into your `Arduino/libraries/` directory.
 
 Restart the IDE; you'll find examples under **File → Examples → Fluxgrid**.
 
@@ -107,6 +108,22 @@ Fluxgrid.println("hello");      // → USB + dashboard, Serial unchanged
 | `Fluxgrid.println(...)` / `.print(...)` / `.printf(...)` | Explicitly tee a line to USB + the log datastream, without redefining `Serial`. |
 | `Fluxgrid.setLogHandle("dbg")` | Publish captured lines to a different datastream handle (default `"log"`). |
 
+**Things to know:**
+
+- **`FLUXGRID_CAPTURE_SERIAL` replaces the `Serial` *token*.** It only affects
+  `Serial` *after* the include in that `.ino` (`Serial1` / `Serial2` are
+  untouched; the library's own internals stay on the real UART). Because it's a
+  blunt text substitution, taking `Serial`'s address or binding it to a
+  `HardwareSerial&` won't compile, and other libraries `#include`d *after*
+  Fluxgrid that use `Serial` in inline/header code get captured too — so put
+  `#include <Fluxgrid.h>` **last**, or use route B instead.
+- **Lines reach the cloud only once connected.** Early boot output is USB-only
+  (it still prints there). Nothing is back-filled on connect.
+- **The cloud rate-limits one stream to a few lines/sec.** Very chatty logging
+  is throttled on the server (the USB monitor always shows everything).
+- **A line that's purely a number** (e.g. `42`) is stored as a numeric value,
+  not a log line. Mixed text is fine.
+
 ## LED control
 
 The library has built-in support for two kinds of LEDs with a unified API — no external LED library needed.
@@ -135,13 +152,30 @@ Fluxgrid.ledOn(48, 0, 200, 255);                 // WS2812 → new colour (also 
 Fluxgrid.ledOff(48);                             // WS2812 → off (0, 0, 0)
 ```
 
+The WS2812 driver uses the ESP32's **RMT hardware peripheral** directly, so the signal timing is handled in hardware — it stays accurate even when WiFi and MQTT are running. No `noInterrupts()` hacks needed.
+
 See `examples/LedControl/LedControl.ino` for a complete sketch that drives both LED types from dashboard widgets.
 
 ## Debug logging
 
-Debug logging is **on by default**. Open **Tools → Serial Monitor** at **115200 baud**; lines are prefixed `[Fluxgrid]`.
+Debug logging is **on by default**. The library narrates what it's doing —
+WiFi join, cloud connect, every value sent and received, config applied — to the
+serial monitor, so you can see exactly what's happening while you build. Open
+**Tools → Serial Monitor** at **115200 baud**; lines are prefixed `[Fluxgrid]`:
 
-To turn debug **off**, `#define FLUXGRID_DEBUG 0` **before** the include:
+```
+[Fluxgrid] debug on — starting (token=abc123, host=mqtt.lonelybinary.cn:8883, tls=yes)
+[Fluxgrid] WiFi: connecting to "my-wifi" ...
+[Fluxgrid] WiFi: connected, IP 192.168.1.42
+[Fluxgrid] cloud: connecting to mqtt.lonelybinary.cn:8883 as dev_abc ...
+[Fluxgrid] cloud: connected — online, subscribed fluxgrid/abc123/w/+
+[Fluxgrid] write: temp = 24.50
+[Fluxgrid] recv: relay = 1
+```
+
+You don't need to call `Serial.begin()` yourself — when debug is on, `begin()`
+starts it for you. To turn debug **off**, `#define FLUXGRID_DEBUG 0` **before**
+the include:
 
 ```cpp
 #define FLUXGRID_DEBUG 0
@@ -153,13 +187,66 @@ To turn debug **off**, `#define FLUXGRID_DEBUG 0` **before** the include:
 | `FLUXGRID_DEBUG` | `1` (on) | `0` silences all serial logging (and skips the auto `Serial.begin`). |
 | `FLUXGRID_DEBUG_BAUD` | `115200` | Baud rate `begin()` uses when it auto-starts Serial. |
 
+## WiFi Scan widget
+
+The **WiFi Scan** widget shows the ESP32's `WiFi.scanNetworks()` results as a
+live Radar, Channel Spectrum, or List view with three selectable color themes.
+
+**Dashboard setup:** create a datastream named `"wifi_scan"` (kind: `json`),
+drop a WiFi Scan widget on the canvas, and bind it to `"wifi_scan"`.
+
+**Sketch:** see **File → Examples → Fluxgrid → WiFiScan**. The sketch publishes
+a compact JSON payload every 10 seconds:
+
+```cpp
+// payload format (short keys keep it under 512 chars for 8 networks)
+// {"n":[{"s":"SSID","r":-62,"c":4,"e":"WPA+WPA2","b":"AA:BB:CC:DD:EE:FF"},…]}
+Fluxgrid.write("wifi_scan", payload);   // payload is a String built by the sketch
+```
+
+Key field names: `s`=SSID, `r`=RSSI (dBm), `c`=channel, `e`=encryption type,
+`b`=BSSID. The BSSID determines where each network sits on the radar — networks
+with a real BSSID always appear in the same position across scans.
+
+**Things to know:**
+- `WiFi.scanNetworks()` takes 1–4 s per call; keep `SCAN_INTERVAL ≥ 5000 ms`.
+- The widget shows a built-in placeholder scan while waiting for the first
+  payload so the tile always looks alive.
+- The Channel Spectrum shows 2.4 GHz channels 1–13. 5 GHz networks that happen
+  to have the same channel number will still render (cosmetically only).
+
+## How it maps to your dashboard
+
+- `Fluxgrid.write("temp", x)` → any **Gauge / Value / Chart** bound to the `temp` datastream updates live.
+- A **Switch / Slider / Button** → read it with `Fluxgrid.read("relay")` or an `onReceive("relay", …)` handler on the device.
+- The device shows **online/offline** automatically, so widgets grey out when it
+  drops. Presence uses the MQTT **Last-Will** for the offline edge (the broker
+  publishes `offline` the moment the device disconnects ungracefully) plus a
+  retained `online` **heartbeat** the library republishes every 30s. The
+  heartbeat keeps devices that send little or no telemetry (e.g. relay-only
+  boards) correctly marked online — call `Fluxgrid.run()` regularly in `loop()`
+  for it to fire.
+
+Under the hood it speaks the Fluxgrid topic scheme so you don't have to:
+
+```
+fluxgrid/<token>/v/<pin>     telemetry up
+fluxgrid/<token>/w/<pin>     control writes down
+fluxgrid/<token>/status      online/offline (retained)
+```
+
 ## Security note
 
 Each device has its **own** MQTT account and a broker ACL that locks it to its
 own `fluxgrid/<token>/#` topic subtree — one device cannot read or write
-another's topics.
+another's topics. Those per-device credentials are bundled into the single
+`FG_TOKEN` string (`<token>.<user>.<pass>`) and split by the library at
+`begin()`.
 
-TLS is on by default (`secure(true)`). For production devices, pin your broker's root CA:
+TLS is on by default (`secure(true)`), so the link is always encrypted. Out of
+the box the server certificate is **not verified** — friendly for getting
+started, but an active attacker who can redirect your traffic could impersonate
+the broker. For production devices, pin your broker's root CA:
 
 ```cpp
 static const char ROOT_CA[] = R"PEM(
@@ -173,5 +260,9 @@ void setup() {
   Fluxgrid.begin();
 }
 ```
+
+With a pinned CA the device refuses to connect to anything that can't present a
+certificate signed by it. (The PEM string must stay alive — a global, as above,
+is the usual way.)
 
 MIT License · Lonely Binary
