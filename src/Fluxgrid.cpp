@@ -600,7 +600,8 @@ void FluxgridClass::_ws2812Send(uint8_t gpio, uint8_t rmtIdx,
       items[23 - i].level1    = 0; items[23 - i].duration1 = 8;
     }
   }
-  rmtInit(gpio, RMT_TX_MODE, RMT_MHZ_TO_TICKS(10));
+  // Clock RMT at 10 MHz → 100 ns per tick (see durations above).
+  rmtInit(gpio, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000);
   rmtWrite(gpio, items, 24, RMT_WAIT_FOR_EVER);
 
 #else
