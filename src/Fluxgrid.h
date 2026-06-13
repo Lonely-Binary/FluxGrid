@@ -37,6 +37,17 @@
 #ifndef FLUXGRID_H
 #define FLUXGRID_H
 
+/*
+  Library version — keep in sync with library.properties `version=`.
+
+  Printed to the debug log on boot (so you can confirm which version is flashed
+  from the Serial Monitor) and reported to the dashboard on connect, so the
+  cloud can show each device's running version and flag out-of-date firmware.
+*/
+#ifndef FLUXGRID_VERSION
+#define FLUXGRID_VERSION "0.9.3"
+#endif
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>

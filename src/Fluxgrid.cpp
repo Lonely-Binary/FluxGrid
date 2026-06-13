@@ -387,6 +387,7 @@ void FluxgridClass::begin(const char *ssid, const char *pass) {
   // Make sure the serial monitor is alive so the user actually sees the logs.
   if (!Serial) Serial.begin(FLUXGRID_DEBUG_BAUD);
 #endif
+  FG_LOG("Fluxgrid library v%s", FLUXGRID_VERSION);
   FG_LOG("debug on — starting (token=%s, host=%s:%u, tls=%s)",
          (_token && _token[0]) ? _token : "(none)",
          _host, _port, _secure ? (_caCert ? "yes, CA pinned" : "yes, unverified") : "no");
@@ -438,7 +439,11 @@ bool FluxgridClass::connectCloudOnce() {
          (_mqttUser && _mqttUser[0]) ? _mqttUser : "(no user)");
   bool ok = _mqtt.connect(clientId.c_str(), _mqttUser, _key, status.c_str(), 0, true, "offline");
   if (ok) {
-    _mqtt.publish(status.c_str(), "online", true);
+    // Presence payload carries the library version after the "online" keyword,
+    // e.g. "online 0.9.3". The Last-Will is a bare "offline", and any reader
+    // that only checks the first token still sees "online".
+    String online = String("online ") + FLUXGRID_VERSION;
+    _mqtt.publish(status.c_str(), online.c_str(), true);
     String wsub = base() + "/w/+";
     _mqtt.subscribe(wsub.c_str());
     FG_LOG("cloud: connected — online, subscribed %s", wsub.c_str());
@@ -487,7 +492,8 @@ void FluxgridClass::run() {
   if (now - _lastBeat >= 30000) {
     _lastBeat = now;
     String status = base() + "/status";
-    _mqtt.publish(status.c_str(), "online", true);
+    String online = String("online ") + FLUXGRID_VERSION;
+    _mqtt.publish(status.c_str(), online.c_str(), true);
   }
   if (_otaEnabled) ArduinoOTA.handle();
   if (_acEnabled) runAutoConfig();

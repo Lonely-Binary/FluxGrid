@@ -226,13 +226,17 @@ with a real BSSID always appear in the same position across scans.
   heartbeat keeps devices that send little or no telemetry (e.g. relay-only
   boards) correctly marked online — call `Fluxgrid.run()` regularly in `loop()`
   for it to fire.
+- The library **reports its version** to the dashboard: the presence payload is
+  `online <version>` (e.g. `online 0.9.3`), so the device list can show which
+  firmware each board runs and flag out-of-date ones. The same version is
+  printed to the Serial Monitor on boot (`[Fluxgrid] Fluxgrid library v0.9.3`).
 
 Under the hood it speaks the Fluxgrid topic scheme so you don't have to:
 
 ```
 fluxgrid/<token>/v/<pin>     telemetry up
 fluxgrid/<token>/w/<pin>     control writes down
-fluxgrid/<token>/status      online/offline (retained)
+fluxgrid/<token>/status      online[ <version>] / offline (retained)
 ```
 
 ## Security note
