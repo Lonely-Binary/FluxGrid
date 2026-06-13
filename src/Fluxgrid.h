@@ -444,7 +444,11 @@ inline void FluxgridClass::begin() {
 class FluxgridSerial : public Print {
 public:
   void begin(unsigned long baud)                 { Serial.begin(baud); }
-  void begin(unsigned long baud, uint32_t config){ Serial.begin(baud, config); }
+  // Templated so the two-arg body is only instantiated if the sketch actually
+  // calls it: when Serial is USB CDC (HWCDC), begin() takes baud only, so a
+  // non-template overload would fail to compile even when unused.
+  template <typename Config>
+  void begin(unsigned long baud, Config config)  { Serial.begin(baud, config); }
   void end()                                     { Serial.end(); }
   /* Datastream handle the captured lines are published to (default "log"). */
   void setLogHandle(const char *handle) { if (handle && handle[0]) _handle = handle; }
