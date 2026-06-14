@@ -439,19 +439,24 @@ bool FluxgridClass::connectCloudOnce() {
          (_mqttUser && _mqttUser[0]) ? _mqttUser : "(no user)");
   bool ok = _mqtt.connect(clientId.c_str(), _mqttUser, _key, status.c_str(), 0, true, "offline");
   if (ok) {
+    // Subscribe to control writes BEFORE announcing "online". The cloud replays
+    // the last stateful control values (switch/slider) the moment it sees this
+    // device come online, so the subscription must already be in place or that
+    // replay would race ahead of it and be lost. QoS 1 so the broker buffers
+    // the replay to us rather than dropping it.
+    String wsub = base() + "/w/+";
+    _mqtt.subscribe(wsub.c_str(), 1);
+    if (_acEnabled) {
+      String cfgsub = base() + "/config";
+      _mqtt.subscribe(cfgsub.c_str(), 1);
+      FG_LOG("cloud: autoConfig on, subscribed %s", cfgsub.c_str());
+    }
     // Presence payload carries the library version after the "online" keyword,
     // e.g. "online 0.9.3". The Last-Will is a bare "offline", and any reader
     // that only checks the first token still sees "online".
     String online = String("online ") + FLUXGRID_VERSION;
     _mqtt.publish(status.c_str(), online.c_str(), true);
-    String wsub = base() + "/w/+";
-    _mqtt.subscribe(wsub.c_str());
-    FG_LOG("cloud: connected — online, subscribed %s", wsub.c_str());
-    if (_acEnabled) {
-      String cfgsub = base() + "/config";
-      _mqtt.subscribe(cfgsub.c_str());
-      FG_LOG("cloud: autoConfig on, subscribed %s", cfgsub.c_str());
-    }
+    FG_LOG("cloud: connected — subscribed %s, online", wsub.c_str());
     if (_otaEnabled) ArduinoOTA.begin();
     _lastBeat = millis();
     if (_onConnected) _onConnected();
