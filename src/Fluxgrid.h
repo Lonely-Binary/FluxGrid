@@ -30,6 +30,7 @@
       fluxgrid/<token>/v/<pin>   telemetry up
       fluxgrid/<token>/w/<pin>   control writes down  (retained)
       fluxgrid/<token>/status    online/offline (retained, via MQTT LWT)
+      fluxgrid/<token>/meta      device info {"ssid":…,"info":{chip,mem,mac,fw,net}} (retained, on connect)
 
   Requires: ESP32 Arduino core + PubSubClient (knolleary).
   MIT License · Lonely Binary
@@ -45,7 +46,7 @@
   cloud can show each device's running version and flag out-of-date firmware.
 */
 #ifndef FLUXGRID_VERSION
-#define FLUXGRID_VERSION "0.9.5"
+#define FLUXGRID_VERSION "0.18.0"
 #endif
 
 #include <Arduino.h>
@@ -56,6 +57,7 @@
 #include <functional>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
+#include <FS.h>   // fs::FS base — part of the ESP32 core, always present
 
 #ifndef FLUXGRID_MAX_INPUTS
 #define FLUXGRID_MAX_INPUTS  16
@@ -70,6 +72,65 @@
 #ifndef FLUXGRID_MAX_SLOTS
 #define FLUXGRID_MAX_SLOTS 32
 #endif
+
+/*
+  MQTT packet buffer (bytes). The WHOLE packet — topic + framing + payload —
+  must fit here, for both what you publish and what you receive. The default
+  2048 holds telemetry, control writes and a ~16-network WiFi scan.
+
+  Raise it BEFORE #include <Fluxgrid.h> when a widget sends or receives a larger
+  payload — e.g. the Jukebox streams an entire song in one message:
+
+      #define FLUXGRID_MQTT_BUFFER 1024*8   // 8 KB
+      #include <Fluxgrid.h>
+
+  Costs that many bytes of RAM (trivial on an ESP32). Applied in begin() via
+  PubSubClient::setBufferSize().
+*/
+#ifndef FLUXGRID_MQTT_BUFFER
+#define FLUXGRID_MQTT_BUFFER 2048
+#endif
+
+/*
+  File explorer — how many mounted volumes a device can expose at once.
+
+  Each addVolume() call (one per mounted fs::FS, e.g. LittleFS + an SD card)
+  takes one slot. Raise this BEFORE #include <Fluxgrid.h> if a board mounts more.
+*/
+#ifndef FLUXGRID_MAX_VOLUMES
+#define FLUXGRID_MAX_VOLUMES 4
+#endif
+
+/*
+  Volume type constants for addVolume(). They classify a mounted filesystem so
+  the dashboard can pick the right icon and the library knows how to "format" it:
+
+    FG_FLASH   on-chip flash (LittleFS / FFat) — real .format() available
+    FG_SD      removable SD card (SD / SD_MMC) — no portable format (wipe-all)
+    FG_FS_OTHER  anything else mounted as an fs::FS
+
+  Reported to the cloud as the strings "flash" / "sd" / "other".
+*/
+#define FG_FLASH    ((uint8_t)0)
+#define FG_SD       ((uint8_t)1)
+#define FG_FS_OTHER ((uint8_t)2)
+
+/*
+  Compile-time "does T have a format() method?" used by the templated
+  addVolume() for known flash types. Only LittleFS / FFat expose format(); the
+  SD classes (SD / SD_MMC) do not. The first overload is selected (via the
+  preferred `int` argument) only when `p->format()` is well-formed, so the
+  template instantiates cleanly even for an SD filesystem — it just gets a null
+  format function and a "format" request falls back to wiping the volume.
+*/
+template <typename T>
+inline auto _fgMakeFormatFn(T *p, int) -> decltype(p->format(), std::function<bool()>()) {
+  return [p]() -> bool { return p->format(); };
+}
+template <typename T>
+inline std::function<bool()> _fgMakeFormatFn(T * /*p*/, long) {
+  return std::function<bool()>(); // T has no format() — null
+}
 
 /*
   Debug logging — ON by default.
@@ -141,12 +202,15 @@
 */
 #ifndef WIFI_SSID
 #define WIFI_SSID ""
+#define FG_FALLBACK_WIFI_SSID
 #endif
 #ifndef WIFI_PASS
 #define WIFI_PASS ""
+#define FG_FALLBACK_WIFI_PASS
 #endif
 #ifndef FG_TOKEN
 #define FG_TOKEN ""
+#define FG_FALLBACK_FG_TOKEN
 #endif
 
 // LED type constants for addLed()
@@ -206,6 +270,44 @@ public:
   /* Use this overload if you set the device with setDevice() first. */
   void begin(const char *ssid, const char *pass);
 
+  /* ── WiFi & connectivity control (all optional) ───────────────────────────
+     By default the library OWNS WiFi: zero-arg begin() joins WIFI_SSID /
+     WIFI_PASS in STA mode and reconnects for you. The calls below let you take
+     it over or run without the cloud. */
+
+  /* Hand WiFi to your own code — call BEFORE begin(). With manageWiFi(false)
+     the library never touches the radio: bring up STA / AP / AP+STA yourself
+     (or via WiFiManager, Improv, …) and Fluxgrid rides on top. run() then only
+     observes the link, it never drives it (no mode changes, no reconnect kicks,
+     never blocks). */
+  void manageWiFi(bool on);
+
+  /* Cloud (MQTT) on/off — call BEFORE begin(). Default on. cloud(false) makes a
+     pure local device with no broker (e.g. an offline AP dashboard). */
+  void cloud(bool on);
+
+  /* Bring up / tear down the device's own WiFi access point. Convenience for
+     local access without writing WiFi.softAP() yourself; uses AP+STA so an
+     existing STA link (and the cloud) keeps working alongside the AP. Safe to
+     call after begin(); pass no password for an open AP. */
+  void startAP(const char *ssid, const char *pass = nullptr);
+  void stopAP();
+
+  /* ── Local bridge hooks ───────────────────────────────────────────────────
+     Used by the optional, header-only FluxgridLocal companion (offline / AP
+     dashboard) to tee data between this client and a local web server. Harmless
+     if you never use FluxgridLocal. */
+
+  /* Register a tee fired on every write(handle, value) — including when the
+     cloud is off or disconnected — so a local server can push telemetry over
+     SSE. */
+  void onWrite(std::function<void(const char *handle, const String &value)> fn);
+
+  /* Apply a value as if it arrived from the cloud: updates read()'s cache and
+     fires the matching onReceive() callback. A local /write endpoint routes
+     control writes through here so they behave identically to cloud writes. */
+  void inject(const char *pin, const String &value);
+
   /* Optional — call BEFORE begin(): */
   /* Single combined device token "<token>.<user>.<pass>" — the library splits
      it into a routing token + MQTT user/pass. This is what the dashboard hands
@@ -214,6 +316,27 @@ public:
   /* Per-device MQTT credentials (recommended): token for routing, user/pass for auth. */
   void setDevice(const char *token, const char *mqttUser, const char *mqttPass);
   void setServer(const char *host, uint16_t port);
+
+  /* Pick the Fluxgrid cloud region — call BEFORE begin().
+
+     Fluxgrid runs one cloud per region, each with its own broker, accounts and
+     devices. A device belongs to exactly ONE of them: the region you signed up
+     in. Its credentials do not exist on the other, so pointing a device at the
+     wrong region fails to authenticate.
+
+         "com"  mqtt.lonelybinary.com   (default — global)
+         "cn"   mqtt.lonelybinary.cn    (China)
+
+     You only need this if you are on the China cloud:
+
+         Fluxgrid.region("cn");
+         Fluxgrid.begin();
+
+     The sketch the dashboard generates for you already has the right line, so
+     copy from there and you can ignore this. An unknown code is ignored (the
+     default stands) and logged when debug is on. setServer() overrides it. */
+  void region(const char *code);
+
   void secure(bool on = true);
 
   /*
@@ -258,6 +381,13 @@ public:
      double, bool, C-string or String and the right one is selected for you. */
   void write(const char *handle, int value);
   void write(const char *handle, long value);
+  // Unsigned overloads matter more than they look: ESP.getFreeHeap() and
+  // friends return uint32_t, which converts equally well to int/long/float/
+  // double/bool — so without these the most natural call on an ESP32,
+  //   Fluxgrid.write("heap", ESP.getFreeHeap());
+  // is ambiguous and fails to compile.
+  void write(const char *handle, unsigned int value);
+  void write(const char *handle, unsigned long value);
   void write(const char *handle, float value);
   void write(const char *handle, double value);
   void write(const char *handle, bool value);
@@ -283,6 +413,67 @@ public:
   /* React to incoming writes. The lambda receives a FluxValue:
        Fluxgrid.onReceive("pump", [](FluxValue v){ ... v.asBool() ... }); */
   void onReceive(const char *handle, std::function<void(FluxValue)> fn);
+
+  /*
+    WiFi scan → WiFi Scan widget.
+
+    Scan for nearby access points and publish them to a datastream a WiFi Scan
+    widget reads. The payload is a JSON array, strongest signal first, capped to
+    `maxNets` and trimmed to fit the MQTT buffer:
+
+      [{"ssid":"NET","rssi":-62,"channel":4,"enc":"WPA2","bssid":"AA:BB:.."},…]
+
+    Blocking form — runs the scan (1–4 s, blocks loop() so MQTT keepalive pauses
+    for that window) then publishes. Returns the number of networks published,
+    or a negative value if the scan failed. Call it on a timer, not every loop:
+
+        if (millis() - last > 10000) { last = millis(); Fluxgrid.writeWiFiScan(); }
+  */
+  int writeWiFiScan(const char *handle = "wifi_scan", int maxNets = 16);
+
+  /*
+    Non-blocking form — keeps Fluxgrid.run()/MQTT responsive during the scan.
+    Call startWiFiScan() once to kick the radio, then call pollWiFiScan() every
+    loop(): it returns -1 while the scan is still running, -2 if none is in
+    flight, or the published count once results are ready (and publishes them).
+
+        Fluxgrid.startWiFiScan();
+        ...
+        int c = Fluxgrid.pollWiFiScan();
+        if (c >= 0) { ...done — kick the next one when you're ready... }
+  */
+  void startWiFiScan();
+  int  pollWiFiScan(const char *handle = "wifi_scan", int maxNets = 16);
+
+  /*
+    One-line automatic memory reporting → Memory Chart widget.
+
+    Call once in setup() and the library publishes the device's heap (and PSRAM,
+    when fitted) to the cloud every `intervalMs` on its own — no per-loop write()
+    calls, no datastreams to create or bind:
+
+        void setup() {
+          Fluxgrid.reportMemory();     // heap + PSRAM, every 5 s
+          Fluxgrid.begin();
+        }
+
+    All the numbers ride in ONE MQTT message on a dedicated `mem` topic (not five
+    separate telemetry writes), and the dashboard's Memory Chart widget just picks
+    this device — exactly like the Device Info widget. Totals (heap / PSRAM size)
+    already come from the device info the library reports on connect.
+
+    What's published each tick (heap always; PSRAM only when ESP.getPsramSize()>0):
+      free_heap      ESP.getFreeHeap()      heap bytes free right now
+      min_free_heap  ESP.getMinFreeHeap()   heap low-water mark since boot
+      max_alloc      ESP.getMaxAllocHeap()  largest single block still allocatable
+      free_psram     ESP.getFreePsram()     PSRAM bytes free right now
+      min_free_psram ESP.getMinFreePsram()  PSRAM low-water mark since boot
+
+    Memory moves slowly, so 5 s keeps the chart live without spamming the broker;
+    pass a different interval for a snappier demo (2000) or long-term leak watch
+    (30000+). Pass 0 to turn it back off.
+  */
+  void reportMemory(uint32_t intervalMs = 5000);
 
   /* Called once each time the cloud connection is (re)established. */
   void onConnected(FluxgridEventFn fn);
@@ -314,12 +505,103 @@ public:
   void ledOn(uint8_t gpio, uint8_t r, uint8_t g, uint8_t b);
   void ledOff(uint8_t gpio);
 
+  /*
+    ── File explorer ─────────────────────────────────────────────────────────
+    Expose a mounted filesystem to the dashboard's File Explorer widget: browse,
+    download, upload, rename, delete and format — all from the browser.
+
+    YOU mount the hardware (the library never touches the SD bus / pins): bring
+    up LittleFS / FFat / SD / SD_MMC in setup(), register each mounted fs::FS as
+    a named volume with addVolume(), then call enableFiles() once. Example:
+
+        #include <LittleFS.h>
+        #include <SD_MMC.h>
+        void setup() {
+          LittleFS.begin(true);
+          Fluxgrid.addVolume("flash", LittleFS, FG_FLASH);  // capacity auto-detected
+          SD_MMC.begin();
+          Fluxgrid.addVolume("sd", SD_MMC, FG_SD);
+          Fluxgrid.enableFiles();
+          Fluxgrid.begin();
+        }
+        void loop() { Fluxgrid.run(); }
+
+    `id` is a short slug you choose ([A-Za-z0-9_-], ≤32 chars) and is how the
+    widget addresses the volume; `label` is the human name shown on the card
+    (defaults to `id`). Mark a volume `readonly` to refuse writes from the cloud.
+
+    Two registration styles:
+
+    • Known types (below) — pass the global object (LittleFS / SD / SD_MMC /
+      FFat) and its FG_* type; capacity is read for you. This is the template
+      overload: it is only instantiated when you call it, so the concrete FS
+      class (and its static totalBytes()/usedBytes(), which the fs::FS base does
+      NOT expose) is in scope from your sketch's own #include.
+
+    • Any FS (the escape hatch) — the explicit overload further down takes two
+      capacity getter lambdas, so you can register a filesystem the known-type
+      path doesn't recognise.
+  */
+  template <typename T>
+  void addVolume(const char *id, T &fs, uint8_t type,
+                 const char *label = nullptr, bool readonly = false) {
+    // Capture the concrete object's ADDRESS so totalBytes()/usedBytes() — and,
+    // for flash, format() — resolve against T here in the sketch's translation
+    // unit, not the fs::FS base (which lacks them). The lambdas are stored and
+    // called later from the .cpp, where only fs::FS is visible. These globals
+    // (LittleFS / SD / SD_MMC / FFat) have program lifetime, so the captured
+    // pointer never dangles.
+    T *p = &fs;
+    std::function<uint64_t()> totalFn = [p]() -> uint64_t { return p->totalBytes(); };
+    std::function<uint64_t()> usedFn  = [p]() -> uint64_t { return p->usedBytes(); };
+    // A real format() only exists for on-chip flash types (LittleFS / FFat); SD
+    // classes have none. _fgMakeFormatFn() compiles to the real call only when
+    // T actually has format() (SFINAE) — so this instantiates cleanly for an SD
+    // type too — and we only USE it for FG_FLASH volumes.
+    std::function<bool()> formatFn =
+        (type == FG_FLASH) ? _fgMakeFormatFn(p, 0) : std::function<bool()>();
+    _addVolume(id, &fs, type, label, readonly, totalFn, usedFn, formatFn);
+  }
+
+  /*
+    Escape hatch — register ANY fs::FS by supplying the capacity getters
+    yourself (the fs::FS base class can't report them). `totalFn`/`usedFn`
+    return bytes; pass nullptr for either if unknown (reported as 0). No
+    format() is wired for this path — a "format" request wipes the volume by
+    deleting everything at root instead.
+
+        Fluxgrid.addVolume("ram", myFs, FG_FS_OTHER,
+                           [](){ return myFs.totalBytes(); },
+                           [](){ return myFs.usedBytes();  });
+  */
+  void addVolume(const char *id, fs::FS &fs, uint8_t type,
+                 std::function<uint64_t()> totalFn,
+                 std::function<uint64_t()> usedFn,
+                 const char *label = nullptr, bool readonly = false);
+
+  /*
+    Turn the file-explorer handler on. Call once in setup() (before begin() is
+    fine). Only then does the device subscribe to its fs/req command topic, so
+    sketches that don't use files never pay for it.
+  */
+  void enableFiles();
+
   /* internal — invoked by the MQTT callback trampoline */
   void _dispatch(char *topic, uint8_t *payload, unsigned int len);
 
 private:
   void connectWiFi();
+  /* Shared by _dispatch (cloud) and inject (local): update read() cache + fire onReceive. */
+  void _applyIncoming(const char *pin, const String &raw);
+  std::function<void(const char *, const String &)> _onWrite = nullptr;
   bool connectCloudOnce();
+  // Build the retained `meta` payload sent on each cloud connect: the joined
+  // SSID plus an `info` block of chip / memory / MAC / firmware / network facts
+  // for the Device Info widget. Serialized with ArduinoJson (escapes for us).
+  String buildMetaPayload();
+  // Build the periodic `mem` payload for reportMemory(): one JSON object with the
+  // live heap (and PSRAM, when fitted) numbers the Memory Chart widget reads.
+  String buildMemPayload();
   String base() const;
 
   const char *_ssid    = nullptr;
@@ -332,7 +614,7 @@ private:
   char _tokenBuf[48] = {0};
   char _userBuf[24]  = {0};
   char _passBuf[40]  = {0};
-  const char *_host    = "mqtt.lonelybinary.cn";
+  const char *_host    = "mqtt.lonelybinary.com";
   uint16_t    _port    = 8883;   // platform default: MQTTS (TLS)
   bool        _secure  = true;   // encrypted by default; secure(false) opts out
   const char *_caCert  = nullptr; // root CA PEM; null = encrypt but don't verify
@@ -344,8 +626,16 @@ private:
   unsigned long    _lastBeat = 0;   // last "online" heartbeat republish (ms)
   unsigned long    _lastWifiTry = 0;// last non-blocking WiFi reconnect kick (ms)
   bool             _started = false;
+  bool             _manageWifi = true;  // false → the sketch owns the radio
+  bool             _cloud      = true;  // false → no MQTT (local-only device)
+  bool             _apOn       = false; // soft-AP currently up
   FluxgridEventFn  _onConnected = nullptr;
   bool             _otaEnabled  = false;
+
+  // ── Automatic memory reporting (reportMemory) ──────────────────────────────
+  bool          _reportMem   = false; // publish `mem` snapshots on a timer
+  uint32_t      _memInterval = 5000;  // ms between snapshots
+  unsigned long _lastMem     = 0;     // last snapshot publish (millis)
 
   // Per-datastream slot: cache + optional callback
   struct Slot {
@@ -360,6 +650,11 @@ private:
 
   Slot *findSlot(const char *pin);
   Slot *findOrCreateSlot(const char *pin);
+
+  // ── WiFi scan internals ────────────────────────────────────────────────
+  // Serialize the completed scan (n results) and publish to `handle`.
+  int _publishWiFiScan(const char *handle, int n, int maxNets);
+  static const char *_wifiEncName(wifi_auth_mode_t mode);
 
   // ── autoConfig internals ──────────────────────────────────────────────
   bool _acEnabled = false;
@@ -427,6 +722,83 @@ private:
 
   LedEntry *_findLed(uint8_t gpio);
   void      _ws2812Send(uint8_t gpio, uint8_t rmtIdx, uint8_t r, uint8_t g, uint8_t b);
+
+  // ── File explorer internals ───────────────────────────────────────────────
+  // One registered volume. `fs` is the mounted filesystem; the *Fn lambdas were
+  // bound to the concrete object in the templated addVolume so they can read
+  // capacity / format it without the base class exposing those calls.
+  struct Volume {
+    char     id[24];
+    char     label[32];
+    uint8_t  type;        // FG_FLASH | FG_SD | FG_FS_OTHER
+    bool     readonly;
+    fs::FS  *fs;
+    std::function<uint64_t()> totalFn; // bytes, or null → 0
+    std::function<uint64_t()> usedFn;  // bytes, or null → 0
+    std::function<bool()>     formatFn; // null → wipe-all on "format"
+  };
+  Volume  _volumes[FLUXGRID_MAX_VOLUMES];
+  uint8_t _volCount     = 0;
+  bool    _filesEnabled = false;
+
+  // Shared, non-template registration the addVolume overloads forward into.
+  void _addVolume(const char *id, fs::FS *fs, uint8_t type, const char *label,
+                  bool readonly, std::function<uint64_t()> totalFn,
+                  std::function<uint64_t()> usedFn, std::function<bool()> formatFn);
+  Volume     *_findVolume(const char *id);
+  static const char *_volTypeName(uint8_t type);
+
+  // Metadata ops — run synchronously inside _dispatch (main loop) and publish
+  // their own reply. Each takes the parsed request doc and the echo id.
+  void _fsDispatch(const char *json, unsigned int len);
+  void _fsVolumes(const char *id);
+  void _fsList(const char *id, Volume *v, const char *path, int limit, const char *cursor);
+  void _fsStat(const char *id, Volume *v, const char *path);
+  void _fsMkdir(const char *id, Volume *v, const char *path);
+  void _fsDelete(const char *id, Volume *v, const char *path);
+  void _fsRename(const char *id, Volume *v, const char *path, const char *to);
+  void _fsFormat(const char *id, Volume *v);
+  // Reply helpers (publish to fs/res from the main thread).
+  void _fsReplyOk(const char *id);
+  void _fsReplyErr(const char *id, const char *err);
+  void _fsPublish(const String &payload);
+  static bool _fsPathOk(const char *p);
+  // Recursively delete everything under `path` on v->fs (path itself too unless
+  // keepRoot). Used by delete (dir) and SD "format" (root, keepRoot=true).
+  static bool _fsRmRf(fs::FS *fs, const String &path, bool keepRoot);
+
+  // ── Bulk transfer (pull/push) — runs on its own core-0 task ────────────────
+  // The task does ONLY HTTP + file IO and never touches MQTT. It writes status
+  // here under _xferMux; run() polls it and publishes progress/result from the
+  // main thread (PubSubClient is single-threaded).
+  enum XferKind : uint8_t { XFER_NONE = 0, XFER_PULL, XFER_PUSH };
+  struct Transfer {
+    volatile bool      active   = false; // a task is running
+    volatile bool      done     = false; // task finished — main thread must publish final + clean up
+    volatile bool      ok       = false; // final outcome
+    volatile bool      progress = false; // a new progress sample is waiting to be published
+    volatile uint64_t  doneBytes = 0;
+    volatile uint64_t  totalBytes = 0;
+    char        id[40];
+    char        err[12];
+    XferKind    kind = XFER_NONE;
+    Volume     *vol  = nullptr;
+    String      path;
+    String      url;
+    TaskHandle_t task = nullptr;
+  };
+  Transfer        _xfer;
+  portMUX_TYPE    _xferMux = portMUX_INITIALIZER_UNLOCKED;
+
+  // Start a transfer (validates + spawns the task). Replies EBUSY itself if one
+  // is already running. id/path/url copied in before the task starts.
+  void _fsStartTransfer(XferKind kind, const char *id, Volume *v,
+                        const char *path, const char *url, uint64_t size);
+  void _fsPollTransfer();         // called every run(): publish progress/result
+  static void _xferTaskTrampoline(void *arg);
+  void _xferRun();                // the task body (HTTP + file IO)
+  // Configure a secure client for the presigned URL (pin CA if we have one).
+  void _fsPrepSecure(WiFiClientSecure &c);
 };
 
 /* The one global instance you use everywhere. */
@@ -441,6 +813,36 @@ inline void FluxgridClass::begin() {
   setDevice(FG_TOKEN);
   begin(WIFI_SSID, WIFI_PASS);
 }
+
+/*
+  Drop the placeholder macros now that the only code that reads them (the
+  inline begin() above) has been preprocessed.
+
+  Leaving them defined rewrites the NAME anywhere later in your sketch, which
+  is invisible and confusing when it bites. The ByoWiFi example manages WiFi
+  itself and quite reasonably declares
+
+      const char *WIFI_SSID = "your-wifi";
+
+  after the include — which became `const char *"" = "your-wifi";` and failed
+  to compile with an error pointing at this header, not at the sketch.
+
+  Only the placeholders THIS header invented are removed. A real #define from
+  your sketch is left alone, because your code may legitimately use it again
+  (as several examples do when they call WiFi.begin() themselves).
+*/
+#ifdef FG_FALLBACK_WIFI_SSID
+#undef WIFI_SSID
+#undef FG_FALLBACK_WIFI_SSID
+#endif
+#ifdef FG_FALLBACK_WIFI_PASS
+#undef WIFI_PASS
+#undef FG_FALLBACK_WIFI_PASS
+#endif
+#ifdef FG_FALLBACK_FG_TOKEN
+#undef FG_TOKEN
+#undef FG_FALLBACK_FG_TOKEN
+#endif
 
 /*
   The object that FLUXGRID_CAPTURE_SERIAL aliases Serial to. A Print that tees:

@@ -20,6 +20,8 @@
 #define FG_TOKEN   "paste-device-token"
 #include <Fluxgrid.h>
 
+#define LED_HANDLE   "V1"   // must match the regular-LED control widget's handle
+#define COLOR_HANDLE "V2"   // must match the WS2812 colour control widget's handle
 #define PIN_LED    26
 #define PIN_WS2812 48
 
@@ -29,13 +31,13 @@ void setup() {
   Fluxgrid.addLed(PIN_WS2812, LED_WS2812, 0, 80, 255); // WS2812, default blue-ish
 
   // React to V1: toggle the regular LED
-  Fluxgrid.onReceive("V1", [](FluxValue v) {
+  Fluxgrid.onReceive(LED_HANDLE, [](FluxValue v) {
     if (v.asBool()) Fluxgrid.ledOn(PIN_LED);
     else            Fluxgrid.ledOff(PIN_LED);
   });
 
   // React to V2: change the WS2812 colour by name
-  Fluxgrid.onReceive("V2", [](FluxValue v) {
+  Fluxgrid.onReceive(COLOR_HANDLE, [](FluxValue v) {
     String colour = v.asString();
     colour.toLowerCase();
     if      (colour == "red")   Fluxgrid.ledOn(PIN_WS2812, 200,   0,   0);

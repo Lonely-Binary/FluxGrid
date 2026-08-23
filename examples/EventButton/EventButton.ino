@@ -14,6 +14,8 @@
 #define FG_TOKEN   "paste-device-token"   // one string per device, from the dashboard
 #include <Fluxgrid.h>            // ← credentials must be #defined ABOVE this line
 
+#define BUTTON_HANDLE  "button"    // must match your Button widget's datastream handle
+#define PRESSES_HANDLE "presses"   // datastream the press count is reported back on
 #define OUT_PIN    2            // any output GPIO (flashes on each press)
 
 unsigned long pressCount = 0;
@@ -23,7 +25,7 @@ void setup() {
   pinMode(OUT_PIN, OUTPUT);
 
   // Register event callback before begin()
-  Fluxgrid.onReceive("button", [](FluxValue v) {
+  Fluxgrid.onReceive(BUTTON_HANDLE, [](FluxValue v) {
     if (v.asBool()) {                // button press (value == 1)
       pressCount++;
       Serial.print("Button pressed! Total: ");
@@ -33,7 +35,7 @@ void setup() {
       delay(100);
       digitalWrite(OUT_PIN, LOW);
       // Report count back to the dashboard
-      Fluxgrid.write("presses", (long)pressCount);
+      Fluxgrid.write(PRESSES_HANDLE, (long)pressCount);
     }
   });
 

@@ -21,7 +21,9 @@
 #define FG_TOKEN   "paste-device-token"   // one string per device, from the dashboard
 #include <Fluxgrid.h>
 
-#define OUT_PIN    2            // any output GPIO (drives a LED/relay from "relay")
+#define TEMP_HANDLE  "temp"    // must match your Gauge widget's datastream handle
+#define RELAY_HANDLE "relay"   // must match your Switch widget's datastream handle
+#define OUT_PIN    2            // any output GPIO (drives a LED/relay from RELAY_HANDLE)
 
 void setup() {
   pinMode(OUT_PIN, OUTPUT);
@@ -34,11 +36,11 @@ void loop() {
   Fluxgrid.run();                         // keep the connection alive
 
   // Read: apply the latest switch value to the output (false until first cloud write)
-  digitalWrite(OUT_PIN, Fluxgrid.read("relay").asBool() ? HIGH : LOW);
+  digitalWrite(OUT_PIN, Fluxgrid.read(RELAY_HANDLE).asBool() ? HIGH : LOW);
 
   if (millis() - lastSend > 2000) {       // send a reading every 2 seconds
     lastSend = millis();
     float tempC = analogRead(4) * (50.0 / 4095.0);  // replace with your sensor
-    Fluxgrid.write("temp", tempC);
+    Fluxgrid.write(TEMP_HANDLE, tempC);
   }
 }
