@@ -184,7 +184,7 @@ void loop() {
 The data bridge is automatic: `Fluxgrid.write()` is pushed to browsers over SSE,
 and a control widget tapped in the browser calls your `Fluxgrid.onReceive()` —
 the same callback cloud control writes use. Until a dashboard is pushed
-(from the Fluxgrid app's **Push to device**, over the AP), the device serves a
+(from the Fluxgrid app's **Push to device** — see below), the device serves a
 small onboarding page instead of a 404.
 
 | Call | What it does |
@@ -198,6 +198,28 @@ small onboarding page instead of a 404.
 `ArduinoJson`, and a Partition Scheme with a LittleFS partition. See the
 **LocalDashboard** example. Note the local AP has no TLS — gate the device
 before exposing it on an untrusted network.
+
+### Push a dashboard from the cloud editor
+
+The editor's **Manage ▸ Push to device…** sends the current page's layout to the
+device *over the cloud*: the app stages the (filtered) `dashboard.json` and the
+device pulls it onto LittleFS `/dashboard.json`, which `FluxgridLocal` then
+serves offline. Online-only widgets (maps, fleet, camera, file explorer…) are
+dropped automatically; the modal previews exactly what ships.
+
+For the device to **receive** a push it must, at push time:
+
+- be **online and cloud-connected** — `Fluxgrid.cloud(true)` (the default) over
+  real WiFi; an **AP+STA** setup receives the push *and* keeps serving offline
+  afterwards, and
+- expose flash to the file transport —
+  `Fluxgrid.addVolume("flash", LittleFS, FG_FLASH)` + `Fluxgrid.enableFiles()`.
+
+The **LocalDashboard** example is pure-offline (`cloud(false)`, AP only) and so
+**cannot** receive a cloud push. Use the **LocalDashboardCloud** example (AP+STA,
+with `addVolume`/`enableFiles`) when you want to push from the editor. The player
+bundle (`player.html.gz`) is flashed/uploaded separately; a routine push only
+re-sends the small layout JSON.
 
 ## Serial monitor on the dashboard
 

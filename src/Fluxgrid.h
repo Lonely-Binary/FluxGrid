@@ -46,7 +46,7 @@
   cloud can show each device's running version and flag out-of-date firmware.
 */
 #ifndef FLUXGRID_VERSION
-#define FLUXGRID_VERSION "0.18.0"
+#define FLUXGRID_VERSION "0.18.1"
 #endif
 
 #include <Arduino.h>
